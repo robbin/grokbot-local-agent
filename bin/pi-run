@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 默认调用 Pi：deepseek-flash + thinking high + 全工具（读写/执行命令）
+# 用法：pi-run <工作目录> "<提示词>" [--session <任务名>] [--timeout 秒] [--verbose]
+here="$(cd "$(dirname "$0")" && pwd)"
+export PATH=$HOME/.local/bin:$PATH
+dir="$1"; shift; prompt="$1"; shift
+exec "$here/pi-call.mjs" "$dir" deepseek/deepseek-flash "$prompt" --allow-write --thinking high "$@"
