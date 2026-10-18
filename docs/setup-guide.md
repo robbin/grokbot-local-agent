@@ -16,20 +16,20 @@ flowchart TD
   P -->|"工具调用"| F["文件 / bash / 联网搜索"]
   P -->|"模型请求"| M["模型额度（如 DeepSeek）"]
   P -->|"stdout: 事件流"| T
-  T -->|"结束后 POST id/state/exit_code"| W["Webhook"]
+  T -->|"结束后 POST id/owner/state/exit_code"| W["Webhook"]
   W --> R["例行任务被唤醒"]
   R --> B
-  B --> Q["pi-task pending<br/>列出已结束未汇报"]
+  B --> Q["pi-task pending --owner 自己的 id<br/>列出已结束未汇报"]
   Q --> V["核查 result.md / git diff / 测试"]
   V --> S["向用户汇报"]
-  S --> A["pi-task ack"]
+  S --> A["pi-task ack --owner 自己的 id"]
   T -.->|"通知丢了也能查到"| Q
 ```
 
-- **启动**：`pi-task run` 第一行输出 `TASK <任务ID>`，之后 Bot 就能继续跟你说话。
+- **启动**：`pi-task run` 第一行输出 `TASK <任务ID>`，之后 Bot 就能继续跟你说话。用 `--owner <agent id>` 把任务标给派活的 Bot（自己的 id 见自己 profile 的路径，形如 `/home/box/agent-data/agents/<your-agent-id>/profile.json`；未给时读 `PI_TASK_OWNER`，都没有则记 `null` 并告警）。
 - **执行**：Pi 在指定工作目录里读写文件、跑命令、联网；每轮提示词、工具调用、状态都落盘。
-- **结束**：`pi-task` 把 `result.md` 写好，然后向 `PI_NOTIFY_URL` 发一条只含 `id`、`state`、`exit_code` 的 POST。
-- **唤醒**：Webhook 触发例行任务，Bot 在新一轮里跑 `pi-task pending`，核查、汇报、`ack`。
+- **结束**：`pi-task` 把 `result.md` 写好，然后向 `PI_NOTIFY_URL` 发一条只含 `source`、`id`、`owner`、`state`、`exit_code` 的 POST。
+- **唤醒**：Webhook 触发例行任务，Bot 在新一轮里跑 `pi-task pending --owner <自己的 id>`，核查、汇报、`ack --owner <自己的 id>`；别的 Bot 的任务转给它自己处理。
 - **兜底**：通知只是“尽快”的优化，真正的完成状态在磁盘上；任何时候被唤醒都先查 `pending`。
 
 ### 为什么不能只靠后台命令的完成通知
@@ -79,7 +79,7 @@ chmod +x ~/tools/pi-call/pi-run ~/tools/pi-call/pi-task ~/tools/pi-call/pi-task.
 | --- | --- |
 | `pi-call.mjs` | 底层 RPC 客户端。启动 `pi --mode rpc`，发一条 `prompt`，等 `agent_settled`，把最后一段回复打到 stdout。Node 22+ 零依赖单文件。 |
 | `pi-run` | 同步快捷入口。bash 包装，固定模型、`--thinking high`、读写执行工具；几十秒能完成的任务前台直接跑。 |
-| `pi-task` + `pi-task.mjs` | 任务化入口。包装脚本 + 实现：给任务编号、落盘状态/事件/结果，支持续聊、取消、`pending`/`ack`，结束时发通知。 |
+| `pi-task` + `pi-task.mjs` | 任务化入口。包装脚本 + 实现：给任务编号、落盘状态/事件/结果，按 owner 归属，支持续聊、取消、`pending`/`ack`，结束时发通知。 |
 
 设计与用法说明见仓库里的 `docs/pi-task-reference.md`，排错时看。
 
@@ -102,18 +102,24 @@ chmod +x ~/tools/pi-call/pi-run ~/tools/pi-call/pi-task ~/tools/pi-call/pi-task.
 ```text
 你是值班助手。收到 Pi 任务完成通知后，按以下步骤处理：
 
-1. 先运行 ~/tools/pi-call/pi-task pending，列出所有已结束但未汇报的任务。
+1. 先运行 ~/tools/pi-call/pi-task pending，列出所有已结束但未汇报的任务，每行带 owner=<id|->。
    没有任何输出就只回复“无待汇报任务”，不要发消息给用户，结束。
-2. 对每个任务：pi-task status <ID> 看状态和退出码；读 ~/.pi/tasks/<ID>/result.md，
-   必要时看 events.jsonl 或 log；用 git diff、跑测试、读产物核查 Pi 真的做了它说的事。
-3. 汇报任务 ID、状态（done/failed/cancelled/interrupted）、一句话结论、核查了什么、
-   产物路径。失败或超时说明原因并问是否重跑，不要自动重跑。
-4. 核查并汇报完成后执行 pi-task ack <ID>；核查没通过就保留 pending 并说明卡在哪。
-5. 除了 `pi-task ack` 之外，不要手动修改 ~/.pi/tasks 下的文件，不读取任何密钥或 auth.json，
+2. 按 owner 分三类处理，不要越权：
+   a. owner 是自己的任务（<your-agent-id>）：status <ID> 看状态和退出码；读 ~/.pi/tasks/<ID>/result.md，
+      必要时看 events.jsonl 或 log；用 git diff、跑测试、读产物核查 Pi 真的做了它说的事。
+   b. owner 是别的 Bot 的任务：不核查、不 ack、不向用户汇报它的结果；用 SendToAgent（priority 设为 true）
+      把任务 ID、owner、状态转给 owner 那个 Bot，请它自己核查、汇报和 ack。当前例行任务环境不能发消息时，
+      不要硬发，把任务 ID 和 owner 交回 Bot 本体，由它在正常对话里转发。
+   c. owner 为 - 的任务（无归属，派活时没给 --owner）：只提醒用户有这个缺 owner 的任务，不核查、不 ack。
+3. 只汇报并 ack 自己的任务：汇报任务 ID、状态（done/failed/cancelled/interrupted）、一句话结论、
+   核查了什么、产物路径（失败或超时说明原因并问是否重跑，不要自动重跑），然后
+   pi-task ack <ID> --owner <your-agent-id>；核查没通过就保留 pending 并说明卡在哪。
+   ack 遇到 owner 不匹配会拒绝（退出码 1），这是预期行为，不要绕开。
+4. 除了 `pi-task ack` 之外，不要手动修改 ~/.pi/tasks 下的文件，不读取任何密钥或 auth.json，
    不替用户推送、部署或对外发消息。
 ```
 
-通知体只含 `{source, id, state, exit_code}`，不含提示词和结果，所以必须靠 `pending` + 读文件才能知道干了什么。
+通知体只有 `{source, id, owner, state, exit_code}`，不含提示词和结果，所以必须靠 `pending` + 读文件才能知道干了什么。自己的 agent id 在 `/home/box/agent-data/agents/<your-agent-id>/profile.json` 这样的 profile 路径里。
 
 ---
 
@@ -129,6 +135,7 @@ chmod +x ~/tools/pi-call/pi-run ~/tools/pi-call/pi-task ~/tools/pi-call/pi-task.
 要求：
 
 - 只通过安全输入框保存，**不要**写进脚本、任务文件、仓库或提示词，也不要出现在命令行参数里。
+- 可选：再存一个 `PI_TASK_OWNER`，作为 `run` 未显式给 `--owner` 时的默认 agent id；显式传 `--owner` 更稳。
 - Bot 的 Shell 会继承这两个变量；`pi-task` 只在环境里同时存在两者时才发通知，否则静默跳过。
 - 发通知时密钥只放在 `Authorization: Bearer ...` 请求头里，不落盘。
 
@@ -141,9 +148,9 @@ test -n "$PI_NOTIFY_URL" && test -n "$PI_NOTIFY_SECRET" && echo env-ok
 
 # 后台跑一个小任务（用 Bot Shell 的后台模式，不要 nohup / & / setsid）
 ~/tools/pi-call/pi-task run /tmp "把 hello 写进 /tmp/pi-e2e/out.txt，然后回复 done" \
-  --session e2e --timeout 180 > /tmp/pi-e2e.log 2>&1
+  --session e2e --owner <your-agent-id> --timeout 180 > /tmp/pi-e2e.log 2>&1
 head -1 /tmp/pi-e2e.log        # TASK e2e-<时间戳>
-~/tools/pi-call/pi-task status e2e-<时间戳>
+~/tools/pi-call/pi-task status e2e-<时间戳>    # 确认 owner 是自己
 grep notify ~/.pi/tasks/e2e-<时间戳>/events.jsonl
 ```
 
@@ -151,7 +158,7 @@ grep notify ~/.pi/tasks/e2e-<时间戳>/events.jsonl
 
 | 检查点 | 预期 |
 | --- | --- |
-| `status` | `state=done`、`exit_code=0`，`result.md` 已生成 |
+| `status` | `state=done`、`exit_code=0`、`owner` 是自己，`result.md` 已生成 |
 | `events.jsonl` | 十几秒内出现 `{"type":"notify","text":"http 200"}` |
 | 例行任务 | 被 Webhook 唤醒，在聊天里汇报任务 ID、状态、结论和产物 |
 | `pending` | 汇报并 `ack` 后为空；`status` 里 `reported=true` |
@@ -168,14 +175,16 @@ grep notify ~/.pi/tasks/e2e-<时间戳>/events.jsonl
 重活交给本机 Pi Agent，用 ~/tools/pi-call/pi-task。适用：批量文件处理、写代码、
 长篇调研/联网搜索、长文初稿、用户点名要 Pi 做或要第二意见。短问答和连接器操作自己做。
 
-启动：pi-task run <工作目录> "<提示词>" --session <英文kebab名> [--timeout 秒]
+启动：pi-task run <工作目录> "<提示词>" --session <英文kebab名> --owner <自己的 agent id> [--timeout 秒]
 用 Shell 工具自带的后台模式，不要 nohup、&、setsid；记下第一行的 TASK <ID>。
+--owner 把任务标给派活的 Bot，完成通知才找得到人；不给会记 null 并告警，通知就转不回来了。
 提示词短而完整：目标、输入路径、输出文件、完成标准，长材料给路径让 Pi 自己读。
 
-每次被唤醒（用户消息、例行任务）：只要派过任务，先跑 pi-task pending。
-每个已结束任务：status + 读 result.md + git diff/测试/读产物核查，再向用户汇报，
-然后 pi-task ack <ID>。失败先说明原因并问是否重跑，不要自动重跑。
-接着改：pi-task reply <ID> "<要改什么>"（同一会话、同一目录）。
+每次被唤醒（用户消息、例行任务）：只要派过任务，先跑 pi-task pending --owner <自己的 agent id>。
+每个自己的已结束任务：status + 读 result.md + git diff/测试/读产物核查，再向用户汇报，
+然后 pi-task ack <ID> --owner <自己的 agent id>。只 ack 自己的；别的 Bot 的任务不核查不 ack，
+用 SendToAgent（priority true）转给它的 owner。失败先说明原因并问是否重跑，不要自动重跑。
+接着改：pi-task reply <ID> "<要改什么>"（同一会话、同一目录，owner 沿用原任务）。
 超时就拆小或加大 --timeout；同一会话同时只能有一个 running 任务。
 
 规则：不让 Pi 读 auth.json、密钥文件或环境变量里的 key；推送、部署、改线上、
@@ -189,15 +198,16 @@ grep notify ~/.pi/tasks/e2e-<时间戳>/events.jsonl
 
 | 子命令 | 作用 |
 | --- | --- |
-| `run <cwd> "<提示词>" --session <名>` | 新建任务；stdout 第一行 `TASK <ID>`，结束打印 `STATE`、`RESULT` |
-| `reply <ID> "<提示词>"` | 同一会话、同一目录追加一轮（沿用 thinking/权限设置） |
-| `status <ID>` | 状态、模型、cwd、耗时、轮数、`reported`、最近事件 |
-| `list [--all]` | 默认列 running + 最近 24 小时的任务 |
+| `run <cwd> "<提示词>" --session <名> --owner <agent id>` | 新建任务；stdout 第一行 `TASK <ID>`，结束打印 `STATE`、`RESULT` |
+| `reply <ID> "<提示词>"` | 同一会话、同一目录追加一轮（沿用 thinking/权限设置和 owner） |
+| `status <ID>` | 状态、owner、模型、cwd、耗时、轮数、`reported`、最近事件 |
+| `list [--all] [--owner <id>|none]` | 默认列 running + 最近 24 小时的任务，可按 owner 过滤 |
 | `log <ID> [-n 30]` | 最近 n 条事件（工具调用、重试、通知等） |
 | `cancel <ID>` | 先 SIGTERM，12 秒未停则 SIGKILL 并记 `cancelled` |
-| `pending` | 已结束但 `reported=false` 的任务，附 `result.md` 路径 |
-| `ack <ID> [<ID>...]` | 标记 `reported=true` |
+| `pending [--owner <id>|none]` | 已结束但 `reported=false` 的任务，附 owner 和 `result.md` 路径 |
+| `ack <ID> [<ID>...] [--owner <id>|none]` | 标记 `reported=true`；owner 不匹配的拒绝，退出码 1 |
 
+`--owner <agent id>` 是派活 Bot 的 agent id（未给时读 `PI_TASK_OWNER`，都没有则记 `null` 并告警）；`--owner none` 只匹配 `owner=null` 的任务。
 `run` 还支持 `--timeout 秒`（`0` 表示不超时）、`--model provider/model`、`--thinking off|low|medium|high`、`--no-write`、`--no-web`。
 
 | 退出码 | 含义 |

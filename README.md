@@ -16,7 +16,9 @@
 
 ## 解决方案
 
-`bin/pi-task` 把一次性调用包装成“有编号、有状态、有产物”的任务：状态落盘在 `~/.pi/tasks/<任务ID>/`，结束时向 Webhook 发一条只含 `{id, state, exit_code}` 的通知，触发 Bot 的例行任务，让 Bot 在新一轮里回来核查结果。
+`bin/pi-task` 把一次性调用包装成“有编号、有状态、有产物”的任务：状态落盘在 `~/.pi/tasks/<任务ID>/`，结束时向 Webhook 发一条只含 `{source, id, owner, state, exit_code}` 的通知，触发 Bot 的例行任务，让 Bot 在新一轮里回来核查结果。
+
+每个任务都记录派活 Bot 的 agent id（`run --owner <agent id>`，或环境变量 `PI_TASK_OWNER`；都没有时记 `null` 并告警）：`pending`/`list` 可按 owner 过滤，`ack` 拒绝替别的 Bot 标记，避免多个 Bot 互相抢汇报。
 
 ```mermaid
 flowchart TD
@@ -24,13 +26,13 @@ flowchart TD
   T -->|"stdin: prompt / abort"| P["pi --mode rpc<br/>cwd = 指定工作目录"]
   P -->|"工具调用"| F["文件 / bash / 联网搜索"]
   P -->|"stdout: 事件流"| T
-  T -->|"结束后 POST id/state/exit_code"| W["Webhook"]
+  T -->|"结束后 POST id/owner/state/exit_code"| W["Webhook"]
   W --> R["例行任务被唤醒"]
   R --> B
-  B --> Q["pi-task pending<br/>列出已结束未汇报"]
+  B --> Q["pi-task pending --owner 自己的 id<br/>列出已结束未汇报"]
   Q --> V["核查 result.md / git diff / 测试"]
   V --> S["向用户汇报"]
-  S --> A["pi-task ack"]
+  S --> A["pi-task ack --owner 自己的 id"]
   T -.->|"通知丢了也能查到"| Q
 ```
 
@@ -59,10 +61,10 @@ flowchart TD
 | `bin/pi-call.mjs` | 底层 RPC 客户端：启动 `pi --mode rpc`，发一条 `prompt`，等 `agent_settled`，把最后一段回复打到 stdout。Node 22+，零依赖。 |
 | `bin/pi-run` | 同步快捷入口，固定模型、`--thinking high`、读写执行工具，适合几十秒的任务。 |
 | `bin/pi-task` | 任务化入口的包装脚本。 |
-| `bin/pi-task.mjs` | 任务化实现：任务编号、状态/事件/结果落盘，支持续聊、取消、`pending`/`ack`，结束时发通知。 |
+| `bin/pi-task.mjs` | 任务化实现：任务编号、状态/事件/结果落盘，按 owner 归属，支持续聊、取消、`pending`/`ack`，结束时发通知。 |
 | `docs/setup-guide.md` | 完整上手教程：装环境、登录模型、放脚本、建 Webhook 例行任务、端到端验证、常见坑。 |
 | `docs/pi-task-reference.md` | `pi-task` 参考文档：子命令、存储结构、状态与退出码、环境变量。 |
-| `routines/pi-task-notify.md` | Webhook 例行任务的指令模板，建例行任务时直接粘贴。 |
+| `routines/pi-task-notify.md` | Webhook 例行任务的指令模板（按 owner 分三类处理），建例行任务时直接粘贴。 |
 | `skills/pi-agent/SKILL.md` | 给 Bot 的技能说明：什么时候把活交给 Pi、怎么调用、怎么核查、哪些事不许交给 Pi。 |
 
 ## 5 步快速上手
@@ -100,7 +102,7 @@ chmod +x ~/tools/pi-call/pi-run ~/tools/pi-call/pi-call.mjs ~/tools/pi-call/pi-t
 
 **5. 建 Webhook 例行任务并验证**
 
-在 Bot 的例行任务面板新建一个 Webhook 触发的任务，指令粘贴 [`routines/pi-task-notify.md`](routines/pi-task-notify.md) 里的模板；然后把 Webhook URL 和 key 通过安全输入框存成 `PI_NOTIFY_URL`、`PI_NOTIFY_SECRET`（不写进任何文件）。跑一条后台任务，确认 `events.jsonl` 里出现 `notify` 事件、例行任务被唤醒并汇报。
+在 Bot 的例行任务面板新建一个 Webhook 触发的任务，指令粘贴 [`routines/pi-task-notify.md`](routines/pi-task-notify.md) 里的模板；然后把 Webhook URL 和 key 通过安全输入框存成 `PI_NOTIFY_URL`、`PI_NOTIFY_SECRET`（不写进任何文件）。派活时带上 `--owner <your-agent-id>`（自己的 agent id，见自己 profile 的路径，形如 `/home/box/agent-data/agents/<your-agent-id>/profile.json`），否则任务无归属、通知转不回派活的 Bot。跑一条后台任务，确认 `events.jsonl` 里出现 `notify` 事件、例行任务被唤醒并汇报。
 
 最后把 [`skills/pi-agent/SKILL.md`](skills/pi-agent/SKILL.md) 装成 Bot 的技能，或者把里面的规则写进它的系统说明。
 

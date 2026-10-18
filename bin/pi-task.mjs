@@ -325,9 +325,9 @@ function textOf(message) {
 }
 
 // Run one prompt turn inside a task, stream events, update status, exit.
-// 任务结束后通知 Bot：POST {id,state,exit_code} 到 PI_NOTIFY_URL，Bearer PI_NOTIFY_SECRET。
+// 任务结束后通知 Bot：POST {source,id,owner,state,exit_code} 到 PI_NOTIFY_URL，Bearer PI_NOTIFY_SECRET。
 // 用独立的分离子进程发送，密钥只走环境变量，不出现在命令行；未配置则跳过。
-function notify(dir, id, state, code) {
+function notify(dir, id, owner, state, code) {
   const url = process.env.PI_NOTIFY_URL, key = process.env.PI_NOTIFY_SECRET;
   if (!url || !key || process.env.PI_NOTIFY_OFF) return;
   const js = `const [u,b,f]=process.argv.slice(1);const fs=require("fs");
@@ -335,7 +335,7 @@ fetch(u,{method:"POST",headers:{"Content-Type":"application/json",Authorization:
 .then(r=>fs.appendFileSync(f,JSON.stringify({ts:new Date().toISOString(),type:"notify",text:"http "+r.status})+"\\n"))
 .catch(e=>fs.appendFileSync(f,JSON.stringify({ts:new Date().toISOString(),type:"notify",text:"error "+String(e.message||e).slice(0,200)})+"\\n"));`;
   try {
-    const c = spawn(process.execPath, ["-e", js, url, JSON.stringify({ source: "pi-task", id, state, exit_code: code }), join(dir, "events.jsonl")],
+    const c = spawn(process.execPath, ["-e", js, url, JSON.stringify({ source: "pi-task", id, owner: owner ?? null, state, exit_code: code }), join(dir, "events.jsonl")],
       { detached: true, stdio: "ignore", env: process.env });
     c.unref();
   } catch { /* 通知失败不影响任务结果，pending 兜底 */ }
@@ -369,8 +369,12 @@ function execute(id, prompt, timeoutSec) {
 
   const args = piArgs(session, model, thinking, allowWrite, allowWeb);
 
+  // Pi 子进程看不到通知用的 Webhook 地址、密钥和无关的云服务令牌。
+  const piEnv = { ...process.env };
+  delete piEnv.PI_NOTIFY_URL; delete piEnv.PI_NOTIFY_SECRET; delete piEnv.CLOUDFLARE_API_TOKEN;
   const child = spawn(PI_BIN, args, {
     cwd: status.cwd,
+    env: piEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -443,7 +447,7 @@ function execute(id, prompt, timeoutSec) {
       }
     }
     appendEvent(dir, "task_end", undefined, `state=${state} exit=${code}`);
-    notify(dir, id, state, code);
+    notify(dir, id, st ? st.owner ?? null : status.owner ?? null, state, code);
     const out = `STATE ${state}\nRESULT ${join(dir, "result.md")}\n`;
     process.stdout.write(out);
     if (code !== EXIT.done) {
@@ -654,6 +658,45 @@ function execute(id, prompt, timeoutSec) {
 
 // -------------------------------------------------------------- subcommands
 
+// owner 归属：任务只由派活的 Bot 负责 ack，避免互抢别人的结果。
+// 存储为字符串或 null；老任务没有该字段时按 null 处理。
+const OWNER_NONE = "none";
+
+function taskOwner(flags) {
+  if (flags.owner !== undefined) {
+    const s = String(flags.owner).trim();
+    if (!s) usageError(`--owner needs a non-empty value: ${JSON.stringify(flags.owner)}`);
+    if (/\s/.test(s)) usageError(`invalid --owner (no whitespace): ${flags.owner}`);
+    return s;
+  }
+  const env = String(process.env.PI_TASK_OWNER ?? "").trim();
+  if (env) {
+    if (!/\s/.test(env)) return env;
+    process.stderr.write(`pi-task: 警告：PI_TASK_OWNER 无效（含空白）：${env}\n`);
+  }
+  process.stderr.write("pi-task: 警告：未指定 --owner，完成通知无法转回派活的 Bot\n");
+  return null;
+}
+
+// --owner 过滤：undefined = 全部；null = 只看无归属；字符串 = 精确匹配。
+function ownerFilter(flags) {
+  if (flags.owner === undefined) return undefined;
+  const s = String(flags.owner).trim();
+  if (!s) usageError("--owner needs a non-empty value（--owner none 匹配无归属任务）");
+  return s === OWNER_NONE ? null : s;
+}
+
+function ownerMatches(status, filter) {
+  if (filter === undefined) return true;
+  const owner = status?.owner ?? null;
+  return filter === null ? owner === null : owner === filter;
+}
+
+const ownerLabel = (status) => {
+  const owner = status?.owner;
+  return owner === undefined || owner === null || owner === "" ? "-" : String(owner);
+};
+
 function timeoutOf(flags) {
   if (flags.timeout === undefined) return DEFAULT_TIMEOUT;
   const n = Number(flags.timeout);
@@ -681,11 +724,13 @@ function cmdRun(pos, flags) {
   if (!isDir(cwd)) usageError(`cwd is not a directory: ${cwd}`);
   const session = cleanSession(flags.session);
   assertSessionFree(session);
+  const owner = taskOwner(flags);
 
   const id = newTaskId(session);
   const status = {
     id,
     session,
+    owner,
     cwd,
     model: typeof flags.model === "string" && flags.model ? flags.model : DEFAULT_MODEL,
     state: "queued",
@@ -716,6 +761,9 @@ function cmdReply(pos, flags) {
   if (!id || prompt === undefined || prompt === "") {
     usageError('reply needs <id> and a non-empty "<prompt>"');
   }
+  if (flags.owner !== undefined) {
+    usageError("reply 沿用原任务的 owner，不接受 --owner");
+  }
   const status = readStatus(id);
   if (status.state === "running") fail(`task ${id} is still running; wait or cancel it first`);
   if (!TERMINAL.has(status.state)) fail(`task ${id} is in state ${status.state}`);
@@ -734,6 +782,7 @@ function cmdStatus(pos) {
   const lines = [
     `id:       ${status.id}`,
     `state:    ${status.state}`,
+    `owner:    ${ownerLabel(status)}`,
     `session:  ${status.session}`,
     `model:    ${status.model}`,
     `cwd:      ${status.cwd}`,
@@ -754,6 +803,7 @@ function cmdStatus(pos) {
 
 function cmdList(flags) {
   const ids = listTaskIds().sort();
+  const filter = ownerFilter(flags);
   const rows = [];
   for (const id of ids) {
     let status;
@@ -765,13 +815,15 @@ function cmdList(flags) {
     const created = status.created_at ? Date.parse(status.created_at) : NaN;
     const recent = Number.isFinite(created) && Date.now() - created < 24 * 3600 * 1000;
     if (!flags.all && status.state !== "running" && !recent) continue;
+    if (!ownerMatches(status, filter)) continue;
     rows.push({ status, created });
   }
   rows.sort((a, b) => (b.created || 0) - (a.created || 0));
   for (const { status } of rows) {
     const runs = Array.isArray(status.runs) ? status.runs.length : 0;
     process.stdout.write(
-      `${status.id}  ${status.state}  runs=${runs}  created=${humanAge(status.created_at)} ago\n`,
+      `${status.id}  owner=${ownerLabel(status)}  ${status.state}  runs=${runs}  ` +
+        `created=${humanAge(status.created_at)} ago\n`,
     );
   }
 }
@@ -855,7 +907,8 @@ async function cmdCancel(pos) {
   process.stdout.write(`CANCELLED ${id} state=cancelled (forced)\n`);
 }
 
-function cmdPending() {
+function cmdPending(flags) {
+  const filter = ownerFilter(flags);
   const rows = [];
   for (const id of listTaskIds()) {
     let status;
@@ -866,34 +919,47 @@ function cmdPending() {
     }
     if (!TERMINAL.has(status.state)) continue;
     if (status.reported === true) continue;
+    if (!ownerMatches(status, filter)) continue;
     rows.push(status);
   }
   rows.sort((a, b) => String(a.ended_at || "").localeCompare(String(b.ended_at || "")));
   for (const status of rows) {
     const result = join(taskDir(status.id), "result.md");
     process.stdout.write(
-      `${status.id}  ${status.state}  ended=${lt(status.ended_at)}  result=${result}${
-        existsSync(result) ? "" : " (missing)"
-      }\n`,
+      `${status.id}  owner=${ownerLabel(status)}  ${status.state}  ended=${lt(
+        status.ended_at,
+      )}  result=${result}${existsSync(result) ? "" : " (missing)"}\n`,
     );
   }
 }
 
-function cmdAck(pos) {
+function cmdAck(pos, flags) {
   const ids = pos.filter(Boolean);
   if (!ids.length) usageError("ack needs <id> [<id>...]");
+  const filter = ownerFilter(flags);
+  const refused = [];
   for (const id of ids) {
     const status = readStatus(id);
+    if (!ownerMatches(status, filter)) {
+      const why =
+        filter === null
+          ? `owner=${ownerLabel(status)}，与 --owner none 不匹配`
+          : `owner=${ownerLabel(status)}，与 --owner ${filter} 不匹配`;
+      process.stderr.write(`pi-task: 拒绝 ack ${id}：${why}（不能替别的 Bot ack）\n`);
+      refused.push(id);
+      continue;
+    }
     status.reported = true;
     writeStatus(id, status);
     appendEvent(taskDir(id), "ack", undefined, "reported=true");
-    process.stdout.write(`ACK ${id}\n`);
+    process.stdout.write(`ACK ${id}  owner=${ownerLabel(status)}\n`);
   }
+  if (refused.length) flushAndExit(1);
 }
 
 // ------------------------------------------------------------------- argv
 
-const VALUE_FLAGS = new Set(["session", "timeout", "model", "thinking", "n"]);
+const VALUE_FLAGS = new Set(["session", "timeout", "model", "thinking", "n", "owner"]);
 const BOOL_FLAGS = new Set(["no-write", "no-web", "all", "help"]);
 
 function parseArgs(argv) {
@@ -935,19 +1001,24 @@ function parseArgs(argv) {
 }
 
 const USAGE = `usage:
-  pi-task run <cwd> "<prompt>" --session <name> [--timeout sec] [--model provider/model]
-              [--thinking off|low|medium|high] [--no-write] [--no-web]
-  pi-task reply <id> "<prompt>" [--timeout sec]
+  pi-task run <cwd> "<prompt>" --session <name> [--owner <agent id>] [--timeout sec]
+              [--model provider/model] [--thinking off|low|medium|high]
+              [--no-write] [--no-web]
+  pi-task reply <id> "<prompt>" [--timeout sec]      (owner 沿用原任务)
   pi-task status <id>
-  pi-task list [--all]
+  pi-task list [--all] [--owner <agent id>|none]
   pi-task log <id> [-n 30]
   pi-task cancel <id>
-  pi-task pending
-  pi-task ack <id> [<id>...]
+  pi-task pending [--owner <agent id>|none]
+  pi-task ack <id> [<id>...] [--owner <agent id>|none]
+
+  --owner <id>  任务归属的 agent；不给则读 PI_TASK_OWNER，都没有时记 null 并告警
+  --owner none  只匹配 owner=null 的任务
 
 env:
   PI_TASK_DIR          task store (default ~/.pi/tasks)
   PI_TASK_SESSION_DIR  Pi session dir (default ~/.pi/agent/sessions/tasks)
+  PI_TASK_OWNER        default owner for run (fallback when --owner is absent)
   PI_BIN               pi executable (default: pi)
 `;
 
@@ -984,9 +1055,9 @@ async function main() {
     case "cancel":
       return cmdCancel(pos);
     case "pending":
-      return cmdPending();
+      return cmdPending(flags);
     case "ack":
-      return cmdAck(pos);
+      return cmdAck(pos, flags);
   }
 }
 
