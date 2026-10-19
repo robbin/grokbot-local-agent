@@ -1,111 +1,155 @@
-> Hand heavy work from Grok Bot to a local coding agent — and wake the Bot back up when the job is done.
-
 # grokbot-local-agent
 
-一套很小的脚本，让 Grok Bot 把重活交给同一台机器上的本地 Agent，并在任务结束后通过 Webhook 把 Bot 唤醒、核查、汇报。
+Hand heavy work from Grok Bot to a local coding agent—and wake the Bot back up
+when the job is done.
 
-## 背景与问题
+English | [简体中文](README.zh-CN.md)
 
-重度使用 Grok Bot 时，订阅套餐消耗得很快。但并不是所有事情都值得让 Bot 自己在云端一轮轮做完：批量改文件、写代码、整理长文档、联网调研，这些“耗轮次”的活交给本地 Agent 更划算。
+A small set of scripts that lets Grok Bot delegate work to Pi on the **same
+machine**, then use a webhook to wake the Bot for verification and reporting.
+Here, “local” means local to the Bot's Linux cloud computer, not your personal Mac.
 
-问题在于，Bot 调用本地 Agent 之后：
+Documentation and agent templates are maintained in English. Bots should still
+respond in the user's preferred language.
 
-- Agent 做完不会给 Bot 回消息，Shell 也不返回任务状态；
-- 任务跑得久，Bot 那一轮对话早已结束、进入休眠，就算有输出也没人接收；
-- 结果是 Bot 派了活，干得怎么样 Bot 和用户都不知道，Bot 也不会主动回复。
+## Why this exists
 
-## 解决方案
+Heavy Grok Bot usage can consume a subscription allowance quickly. Batch file
+edits, coding, long document drafts and research can instead run through Pi using
+the user's separate model account.
 
-`bin/pi-task` 把一次性调用包装成“有编号、有状态、有产物”的任务：状态落盘在 `~/.pi/tasks/<任务ID>/`，结束时向 Webhook 发一条只含 `{source, id, owner, state, exit_code}` 的通知，触发 Bot 的例行任务，让 Bot 在新一轮里回来核查结果。
+Simply starting a background agent is not enough:
+- The worker does not automatically send its final answer back to the Bot.
+- A long-running task may finish after the Bot's conversation turn has ended.
+- Without durable tracking and a wakeup, neither the Bot nor the user knows
+  whether the delegated work succeeded.
 
-每个任务都记录派活 Bot 的 agent id（`run --owner <agent id>`，或环境变量 `PI_TASK_OWNER`；都没有时记 `null` 并告警）：`pending`/`list` 可按 owner 过滤，`ack` 拒绝替别的 Bot 标记，避免多个 Bot 互相抢汇报。
+## How it works
+
+`bin/pi-task` wraps a call in a task with an ID, status and artifacts under
+`~/.pi/tasks/<ID>/`. On completion it sends only
+`{source, id, owner, state, exit_code}` to a webhook. A routine wakes the Bot,
+which reads the files, verifies the outcome, reports it and acknowledges the task.
+
+Each task records the dispatching Bot's agent ID using `run --owner <agent-id>`
+or `PI_TASK_OWNER`. If neither is supplied, owner is null and a warning is emitted.
+Owner-filtered `pending`, `list` and `ack` help keep Bots from reporting each
+other's work. Always pass `--owner` when acknowledging: an unfiltered ack does
+not enforce ownership.
 
 ```mermaid
 flowchart TD
-  B["Grok Bot"] -->|"Shell 后台启动，不阻塞对话"| T["pi-task run<br/>状态落在 ~/.pi/tasks/任务ID/"]
-  T -->|"stdin: prompt / abort"| P["pi --mode rpc<br/>cwd = 指定工作目录"]
-  P -->|"工具调用"| F["文件 / bash / 联网搜索"]
-  P -->|"stdout: 事件流"| T
-  T -->|"结束后 POST id/owner/state/exit_code"| W["Webhook"]
-  W --> R["例行任务被唤醒"]
+  B["Grok Bot"] -->|"Shell background mode"| T["pi-task run<br/>~/.pi/tasks/ID/"]
+  T -->|"stdin: prompt / abort"| P["pi --mode rpc<br/>configured working directory"]
+  P --> F["Files / shell / web tools"]
+  P -->|"stdout: events"| T
+  T -->|"POST id / owner / state / exit_code"| W["Webhook"]
+  W --> R["Routine wakes Bot"]
   R --> B
-  B --> Q["pi-task pending --owner 自己的 id<br/>列出已结束未汇报"]
-  Q --> V["核查 result.md / git diff / 测试"]
-  V --> S["向用户汇报"]
-  S --> A["pi-task ack --owner 自己的 id"]
-  T -.->|"通知丢了也能查到"| Q
+  B --> Q["pi-task pending --owner own-id"]
+  Q --> V["Verify result.md / git diff / tests"]
+  V --> S["Report to user"]
+  S --> A["pi-task ack --owner own-id"]
+  T -.->|"Recover missed notifications"| Q
 ```
 
-关键点：通知只是“尽快”的优化，**完成状态永远以磁盘为准**。Webhook 丢了、Bot 重启了、会话被打断了，下次被唤醒时跑一次 `pi-task pending` 就能补齐所有未汇报的任务。
+Notifications optimize latency; **disk state is the source of truth**.
+After a missed webhook, restart or interrupted conversation, the next wakeup can
+recover unreported outcomes using `pi-task pending`. Do not rerun work just
+because a notification was missed.
 
-## 限制与 Cursor Cloud Agent 建议
+## Scope and limitations
 
-这套方案有一个前提：Grok Bot 的云电脑并不是完全独立的虚拟机沙箱。它能跑 Shell、能装东西，但长程任务的稳定性、环境隔离和权限边界都有限。
+This is a lightweight second pair of hands on the Bot's machine, not an isolated
+worker service. Do not assume the cloud computer provides a dedicated VM sandbox,
+unlimited process lifetime or strong permission isolation.
 
-所以如果你的目标是让 Bot 调度 Agent 做长时间、多步骤的任务，或者真正写代码并维护一个项目，更推荐直接在 Grok Bot 里拉起 **Cursor Cloud Agent**：它的调度能力、与 Bot 的协作方式都更顺滑，也不需要自己维护通知链路。
+The author's workflow uses three layers:
+1. Grok Bot: conversation, orchestration, connectors and verification.
+2. Pi: batch edits, small scripts, drafts and research.
+3. Cursor Cloud Agent, when available: larger projects intended for ongoing
+   development and GitHub delivery.
 
-这套脚本更适合的定位是：在同一台机器上，让 Bot 有一个便宜、够用的“第二双手”。
+That is a workflow preference, not a requirement or guarantee of any provider's
+features. Long-running project work may be better served by a dedicated cloud
+coding environment than by maintaining this notification chain.
 
-## 作者自己的三层分工
+## Repository layout
 
-1. **Grok Bot**：调度、对话、连接器操作（邮件、GitHub、X 等）、轻量任务，以及对结果的核查和汇报。
-2. **本地 Pi Agent**：稍复杂的活——批量改文件、写小脚本、长文初稿、联网调研。通过 `pi-task` 调用，结果落成文件。
-3. **Cursor Cloud Agent**：完整、要发布到 GitHub、需要长期迭代的项目，由 Grok Bot 直接拉起。
-
-判断标准很简单：能一两步答完的自己做；要动手改东西的交给 Pi；要长期维护的交给 Cursor Cloud Agent。
-
-## 仓库目录说明
-
-| 路径 | 内容 |
+| Path | Purpose |
 | --- | --- |
-| `bin/pi-call.mjs` | 底层 RPC 客户端：启动 `pi --mode rpc`，发一条 `prompt`，等 `agent_settled`，把最后一段回复打到 stdout。Node 22+，零依赖。 |
-| `bin/pi-run` | 同步快捷入口，固定模型、`--thinking high`、读写执行工具，适合几十秒的任务。 |
-| `bin/pi-task` | 任务化入口的包装脚本。 |
-| `bin/pi-task.mjs` | 任务化实现：任务编号、状态/事件/结果落盘，按 owner 归属，支持续聊、取消、`pending`/`ack`，结束时发通知。 |
-| `docs/setup-guide.md` | 完整上手教程：装环境、登录模型、放脚本、建 Webhook 例行任务、端到端验证、常见坑。 |
-| `docs/pi-task-reference.md` | `pi-task` 参考文档：子命令、存储结构、状态与退出码、环境变量。 |
-| `routines/pi-task-notify.md` | Webhook 例行任务的指令模板（按 owner 分三类处理），建例行任务时直接粘贴。 |
-| `skills/pi-agent/SKILL.md` | 给 Bot 的技能说明：什么时候把活交给 Pi、怎么调用、怎么核查、哪些事不许交给 Pi。 |
+| `bin/pi-call.mjs` | One-shot RPC client: starts Pi, sends a prompt, waits for agent_settled and prints the final reply. Node 22+, no third-party dependencies. |
+| `bin/pi-run` | Synchronous shortcut with a fixed model, high thinking and read/write/exec tools. |
+| `bin/pi-task`, `bin/pi-task.mjs` | Tracked tasks, ownership, follow-up turns, cancellation, pending/ack and completion notification. |
+| [Setup guide](docs/setup-guide.md) | Installation, model login, webhook setup, acceptance and troubleshooting. |
+| [CLI reference](docs/pi-task-reference.md) | Commands, storage, states, exit codes and environment variables. |
+| [Routine template](routines/pi-task-notify.md) | Owner-aware completion handling. |
+| [Pi skill](skills/pi-agent/SKILL.md) | Delegation, verification and permission boundaries. |
 
-## 5 步快速上手
+## Quick start
 
-详细命令和排错见 [`docs/setup-guide.md`](docs/setup-guide.md)。
+Run these steps on the Bot's computer. See the [setup guide](docs/setup-guide.md)
+for details. UI labels, provider availability and approvals may vary by host.
 
-**1. 装 Node 22 和 Pi**（全部装到用户目录，不需要 sudo）
+### 1. Prepare Node 22+ and install Pi
+
+Install Node in your user environment if it is not already available; the PATH
+below assumes a Node installation at ~/.node22. No sudo is needed.
 
 ```bash
 export PATH=$HOME/.node22/bin:$HOME/.local/bin:$PATH
+node --version
 npm i -g --prefix ~/.local @earendil-works/pi-coding-agent
 pi --version && which pi
 ```
 
-**2. 登录模型**（必须由你本人操作，Bot 不能代登）
+### 2. Authenticate the model yourself
 
-在终端运行 `pi`，输入 `/login`，选 **Use a subscription**，按提示完成网页授权。凭据落在 `~/.pi/agent/auth.json`，不要让 Bot 或 Agent 读取它。自检：`pi --list-models deepseek`。
+Run `pi` in an interactive terminal, enter `/login`, select the subscription
+option/provider offered by your installation, and complete the authorization.
+Do not ask an agent to inspect or copy `~/.pi/agent/auth.json`.
+`pi --list-models deepseek` lists models without exposing credentials; the smoke
+test below checks actual execution.
 
-**3. 放置脚本**
+The current default is `deepseek/deepseek-flash`. Choose a model available to
+your account; `pi-task run --model provider/model` supports overrides.
+
+### 3. Copy the scripts
+
+From this repository:
 
 ```bash
 mkdir -p ~/tools/pi-call && cp -a bin/. ~/tools/pi-call/
 chmod +x ~/tools/pi-call/pi-run ~/tools/pi-call/pi-call.mjs ~/tools/pi-call/pi-task ~/tools/pi-call/pi-task.mjs
 ```
 
-`pi-run` 和 `pi-task` 会在自己所在的目录里找对应的 `.mjs`，并把 `$HOME/.local/bin` 加进 `PATH`，所以整个目录放在哪儿都能用；但 `node` 和 `pi` 要能在 `PATH` 里找到（把第 1 步的 `export PATH=...` 写进 `~/.bashrc`）。默认模型写在 `pi-run` 里，换模型改那一行或直接调 `pi-call.mjs`。
+Wrappers locate their .mjs files beside themselves and add ~/.local/bin to PATH.
+Ensure both node and pi are available to the Bot's shell. Persist the appropriate
+PATH in your shell setup. The fixed pi-run model is set in that wrapper.
 
-**4. 自测一条命令**
+### 4. Run a smoke test
 
 ```bash
-~/tools/pi-call/pi-run /tmp "只回复 OK 两个字母" --timeout 120; echo "exit=$?"
+~/tools/pi-call/pi-run /tmp "Reply with only OK" --timeout 120
+echo "exit=$?"
 ```
 
-预期 stdout 出现 `OK`、`exit=0`。
+Expect OK and exit=0.
 
-**5. 建 Webhook 例行任务并验证**
+### 5. Configure and verify a webhook routine
 
-在 Bot 的例行任务面板新建一个 Webhook 触发的任务，指令粘贴 [`routines/pi-task-notify.md`](routines/pi-task-notify.md) 里的模板；然后把 Webhook URL 和 key 通过安全输入框存成 `PI_NOTIFY_URL`、`PI_NOTIFY_SECRET`（不写进任何文件）。派活时带上 `--owner <your-agent-id>`（自己的 agent id，见自己 profile 的路径，形如 `/home/box/agent-data/agents/<your-agent-id>/profile.json`），否则任务无归属、通知转不回派活的 Bot。跑一条后台任务，确认 `events.jsonl` 里出现 `notify` 事件、例行任务被唤醒并汇报。
+Create a webhook-triggered routine using the [template](routines/pi-task-notify.md).
+Store its URL and raw Bearer token using the host's secure input facility as
+`PI_NOTIFY_URL` and `PI_NOTIFY_SECRET`, not in files or prompts.
 
-最后把 [`skills/pi-agent/SKILL.md`](skills/pi-agent/SKILL.md) 装成 Bot 的技能，或者把里面的规则写进它的系统说明。
+Dispatch with `--owner YOUR_AGENT_ID`; obtain your Bot's ID from its profile
+location, such as /home/box/agent-data/agents/YOUR_AGENT_ID/profile.json.
+Run the [end-to-end check](docs/setup-guide.md#5-end-to-end-check) and verify
+both the notify event and the Bot's verified report.
+
+Install [skills/pi-agent/SKILL.md](skills/pi-agent/SKILL.md) as a Bot skill, or
+include its rules in the Bot's instructions.
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+[MIT](LICENSE).

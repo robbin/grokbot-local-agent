@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pi 任务化调用：run/reply/status/list/log/cancel/pending/ack，数据在 ~/.pi/tasks/
+# Tracked Pi tasks: run/reply/status/list/log/cancel/pending/ack; data in ~/.pi/tasks/.
 here="$(cd "$(dirname "$0")" && pwd)"
 export PATH=$HOME/.local/bin:$PATH
 exec "$here/pi-task.mjs" "$@"

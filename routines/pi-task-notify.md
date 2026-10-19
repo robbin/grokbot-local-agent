@@ -1,43 +1,64 @@
-# Webhook 例行任务：Pi 任务完成通知
+# Webhook routine: Pi task completion
 
-Grok Bot 的例行任务（Routine）配置模板。`pi-task` 每跑完一个任务会向 Webhook 发一条只含 `{source, id, owner, state, exit_code}` 的通知；这个例行任务被唤醒后，回来读取磁盘上的真实状态，按 owner 分三类处理：自己的任务核查汇报并 ack，别的 Bot 的任务转给它，无 owner 的只提醒用户。
+This Grok Bot routine handles completion notifications containing only
+`{source, id, owner, state, exit_code}`. Read disk state to determine what happened:
+verify/report/ack your own tasks, route other Bots' tasks to them, and flag
+unowned tasks without acknowledging them.
 
-## 怎么建
+## Setup
 
-1. 打开 Bot 的例行任务面板，新建任务，触发方式选 **Webhook**。
-2. 名字随意，例如「Pi 任务完成通知」。
-3. 指令栏粘贴下面的模板，保存。
-4. 复制这个任务的 **Webhook URL** 和 **Webhook key**，通过 Bot 的安全输入框存成两个环境变量：`PI_NOTIFY_URL`、`PI_NOTIFY_SECRET`。不要写进脚本、任务文件、仓库或提示词。
-5. 确认例行任务处于启用状态。`pi-task` 只在两个环境变量都存在时才发通知，否则静默跳过（可用 `PI_NOTIFY_OFF=1` 临时关闭）。
-6. 验证：跑一个小任务，看 `~/.pi/tasks/<ID>/events.jsonl` 里是否出现 `{"type":"notify","text":"http 200"}`，以及聊天里是否收到汇报。步骤见 [`../docs/setup-guide.md`](../docs/setup-guide.md) 第 5 节。
+1. Create a webhook-triggered routine in the Bot's routine interface.
+2. Give it a name such as “Pi task completion”.
+3. Paste the template below, replacing YOUR_AGENT_ID with the receiving Bot's ID.
+4. Supply the webhook URL and raw Bearer token through secure input as
+   PI_NOTIFY_URL and PI_NOTIFY_SECRET. Never put them in files, prompts or a repo.
+5. Enable the routine. Both environment variables are required; PI_NOTIFY_OFF=1
+   temporarily suppresses notifications.
+6. Run an authorized small task and check its notify event and the verified
+   report. See [end-to-end setup](../docs/setup-guide.md#5-end-to-end-check).
 
-## 指令模板
+## Routine instructions
 
 ```text
-你是值班助手。收到 Pi 任务完成通知后，按以下步骤处理：
+You handle Pi completion notifications. Communicate with the user in their
+preferred language, regardless of the language of these instructions.
 
-1. 先运行 ~/tools/pi-call/pi-task pending，列出所有已结束但未汇报的任务，每行带 owner=<id|->。
-   没有任何输出就只回复“无待汇报任务”，不要发消息给用户，结束。
-2. 按 owner 分三类处理，不要越权：
-   a. owner 是自己的任务（<your-agent-id>）：status <ID> 看状态和退出码；读 ~/.pi/tasks/<ID>/result.md，
-      必要时看 events.jsonl 或 log；用 git diff、跑测试、读产物核查 Pi 真的做了它说的事。
-   b. owner 是别的 Bot 的任务：不核查、不 ack、不向用户汇报它的结果；用 SendToAgent（priority 设为 true）
-      把任务 ID、owner、状态转给 owner 那个 Bot，请它自己核查、汇报和 ack。当前例行任务环境不能发消息时，
-      不要硬发，把任务 ID 和 owner 交回 Bot 本体，由它在正常对话里转发。
-   c. owner 为 - 的任务（无归属，派活时没给 --owner）：只提醒用户有这个缺 owner 的任务，不核查、不 ack。
-3. 只汇报并 ack 自己的任务：汇报任务 ID、状态（done/failed/cancelled/interrupted）、一句话结论、
-   核查了什么、产物路径（失败或超时说明原因并问是否重跑，不要自动重跑），然后
-   pi-task ack <ID> --owner <your-agent-id>；核查没通过就保留 pending 并说明卡在哪。
-   ack 遇到 owner 不匹配会拒绝（退出码 1），这是预期行为，不要绕开。
-4. 除了 `pi-task ack` 之外，不要手动修改 ~/.pi/tasks 下的文件，不读取任何密钥或 auth.json，
-   不替用户推送、部署或对外发消息。
+1. Run ~/tools/pi-call/pi-task pending to list all completed but unreported
+   tasks. Each line includes owner=<id|->. If empty, finish with no user-facing
+   notification; use "No pending reports" only if an internal reply is required.
+2. Handle ownership without overstepping:
+   a. Your owner ID is YOUR_AGENT_ID. For your tasks, run status ID, read
+      ~/.pi/tasks/ID/result.md when present, and inspect events/logs as needed.
+      Read status.json for exit_code if needed; do not edit it.
+      Independently verify claimed changes using git diff, tests or artifact reads.
+   b. For another Bot's task, do not inspect its result, ack it or report it to
+      the user. Use SendToAgent with priority=true to forward ID, owner and state
+      to the owner and ask it to verify, report and ack. If the routine cannot
+      send messages, return the routing details to the main Bot for forwarding
+      from a normal conversation; do not bypass that restriction.
+   c. If owner is "-" (unassigned), tell the user the task lacks an owner.
+      Do not verify or ack it.
+3. Report and ack only your own tasks. Include ID, state
+   (done/failed/cancelled/interrupted), a short conclusion, verification evidence
+   and artifact paths. For failure or timeout, explain the cause and ask whether
+   to retry; never automatically rerun. After reporting:
+   ~/tools/pi-call/pi-task ack ID --owner YOUR_AGENT_ID
+   If verification fails, leave the task pending and explain the blocker.
+   Owner mismatch refusal (exit 1) is expected; do not bypass it.
+4. Do not manually modify task-store files; use pi-task ack for acknowledgment.
+   Do not read secrets or auth.json. Do not push, deploy or send external messages
+   on the user's behalf as part of completion handling.
 ```
 
-通知体只有 `{source, id, owner, state, exit_code}`，不含提示词和结果，所以必须靠 `pending` + 读文件才知道干了什么。自己的 agent id 在 `/home/box/agent-data/agents/<your-agent-id>/profile.json` 这样的 profile 路径里。
+The Bot ID is available from its profile path, for example
+/home/box/agent-data/agents/YOUR_AGENT_ID/profile.json.
 
-## 说明
+## Recovery notes
 
-- **通知可能丢**：投递失败、Bot 重启、Webhook 并发排队都会导致收不到。结果始终在磁盘上，用户下次发消息时也应先跑一次 `pi-task pending`。
-- **别 ack 别人的任务**：`ack` 带 `--owner <自己的 id>`，owner 不匹配时 `pi-task` 会拒绝（退出码 1），不要绕开；转给别的 Bot 的任务也不再归你处理。
-- **通知失败不影响任务本身**：`events.jsonl` 里的 `notify` 事件会记下发送结果（`http 200` 或 `error ...`），任务状态和 `result.md` 照常可读。
-- **不要因为没收到通知就重跑任务**：先 `pending` 补汇报，再决定是否需要重跑。
+- Delivery failures, restarts and routine scheduling can delay or lose wakeups.
+  When the Bot next wakes and has dispatched work, check pending again.
+- Always acknowledge with your own owner filter. An unfiltered ack does not
+  enforce ownership. Forwarded tasks remain the dispatching Bot's responsibility.
+- A notify event records the delivery outcome, such as http 200 or error.
+  Notification failure does not invalidate disk results.
+- Do not rerun a task simply because no notification arrived.

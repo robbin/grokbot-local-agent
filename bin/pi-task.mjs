@@ -34,7 +34,7 @@ const EXIT = { done: 0, failed: 1, timeout: 124, cancelled: 130 };
 // ---------------------------------------------------------------- utilities
 
 const iso = () => new Date().toISOString();
-// 显示用本地时间（Bot 电脑时区，Asia/Shanghai），存储仍用 ISO UTC
+// Display in the host's local timezone; store timestamps as ISO UTC.
 const lt = (v) => { if (!v) return "-"; const d = new Date(v); if (isNaN(d)) return String(v); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; };
 const pad = (n, w = 2) => String(n).padStart(w, "0");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -325,8 +325,8 @@ function textOf(message) {
 }
 
 // Run one prompt turn inside a task, stream events, update status, exit.
-// 任务结束后通知 Bot：POST {source,id,owner,state,exit_code} 到 PI_NOTIFY_URL，Bearer PI_NOTIFY_SECRET。
-// 用独立的分离子进程发送，密钥只走环境变量，不出现在命令行；未配置则跳过。
+// Notify the Bot on completion: POST {source,id,owner,state,exit_code} to PI_NOTIFY_URL.
+// A detached notifier receives the Bearer secret via environment, not argv; skip if unconfigured.
 function notify(dir, id, owner, state, code) {
   const url = process.env.PI_NOTIFY_URL, key = process.env.PI_NOTIFY_SECRET;
   if (!url || !key || process.env.PI_NOTIFY_OFF) return;
@@ -338,7 +338,7 @@ fetch(u,{method:"POST",headers:{"Content-Type":"application/json",Authorization:
     const c = spawn(process.execPath, ["-e", js, url, JSON.stringify({ source: "pi-task", id, owner: owner ?? null, state, exit_code: code }), join(dir, "events.jsonl")],
       { detached: true, stdio: "ignore", env: process.env });
     c.unref();
-  } catch { /* 通知失败不影响任务结果，pending 兜底 */ }
+  } catch { /* Notification failure does not affect results; pending provides recovery. */ }
 }
 
 function execute(id, prompt, timeoutSec) {
@@ -369,7 +369,7 @@ function execute(id, prompt, timeoutSec) {
 
   const args = piArgs(session, model, thinking, allowWrite, allowWeb);
 
-  // Pi 子进程看不到通知用的 Webhook 地址、密钥和无关的云服务令牌。
+  // Remove notification URL/secret and unrelated cloud tokens from the Pi child's environment.
   const piEnv = { ...process.env };
   delete piEnv.PI_NOTIFY_URL; delete piEnv.PI_NOTIFY_SECRET; delete piEnv.CLOUDFLARE_API_TOKEN;
   const child = spawn(PI_BIN, args, {
@@ -658,8 +658,8 @@ function execute(id, prompt, timeoutSec) {
 
 // -------------------------------------------------------------- subcommands
 
-// owner 归属：任务只由派活的 Bot 负责 ack，避免互抢别人的结果。
-// 存储为字符串或 null；老任务没有该字段时按 null 处理。
+// Owner routing: Bots should ack only their own tasks using an owner filter.
+// Store a string or null; legacy tasks without this field are treated as null.
 const OWNER_NONE = "none";
 
 function taskOwner(flags) {
@@ -672,17 +672,17 @@ function taskOwner(flags) {
   const env = String(process.env.PI_TASK_OWNER ?? "").trim();
   if (env) {
     if (!/\s/.test(env)) return env;
-    process.stderr.write(`pi-task: 警告：PI_TASK_OWNER 无效（含空白）：${env}\n`);
+    process.stderr.write(`pi-task: warning: invalid PI_TASK_OWNER (contains whitespace): ${env}\n`);
   }
-  process.stderr.write("pi-task: 警告：未指定 --owner，完成通知无法转回派活的 Bot\n");
+  process.stderr.write("pi-task: warning: --owner was not specified; completion cannot be routed to the dispatching Bot\n");
   return null;
 }
 
-// --owner 过滤：undefined = 全部；null = 只看无归属；字符串 = 精确匹配。
+// Owner filter: undefined = all; null = unowned only; string = exact match.
 function ownerFilter(flags) {
   if (flags.owner === undefined) return undefined;
   const s = String(flags.owner).trim();
-  if (!s) usageError("--owner needs a non-empty value（--owner none 匹配无归属任务）");
+  if (!s) usageError("--owner needs a non-empty value (--owner none matches unowned tasks)");
   return s === OWNER_NONE ? null : s;
 }
 
@@ -762,7 +762,7 @@ function cmdReply(pos, flags) {
     usageError('reply needs <id> and a non-empty "<prompt>"');
   }
   if (flags.owner !== undefined) {
-    usageError("reply 沿用原任务的 owner，不接受 --owner");
+    usageError("reply retains the original task owner and does not accept --owner");
   }
   const status = readStatus(id);
   if (status.state === "running") fail(`task ${id} is still running; wait or cancel it first`);
@@ -943,9 +943,9 @@ function cmdAck(pos, flags) {
     if (!ownerMatches(status, filter)) {
       const why =
         filter === null
-          ? `owner=${ownerLabel(status)}，与 --owner none 不匹配`
-          : `owner=${ownerLabel(status)}，与 --owner ${filter} 不匹配`;
-      process.stderr.write(`pi-task: 拒绝 ack ${id}：${why}（不能替别的 Bot ack）\n`);
+          ? `owner=${ownerLabel(status)} does not match --owner none`
+          : `owner=${ownerLabel(status)} does not match --owner ${filter}`;
+      process.stderr.write(`pi-task: refusing ack ${id}: ${why} (cannot ack another Bot's task)\n`);
       refused.push(id);
       continue;
     }
@@ -1004,7 +1004,7 @@ const USAGE = `usage:
   pi-task run <cwd> "<prompt>" --session <name> [--owner <agent id>] [--timeout sec]
               [--model provider/model] [--thinking off|low|medium|high]
               [--no-write] [--no-web]
-  pi-task reply <id> "<prompt>" [--timeout sec]      (owner 沿用原任务)
+  pi-task reply <id> "<prompt>" [--timeout sec]      (retains the original owner)
   pi-task status <id>
   pi-task list [--all] [--owner <agent id>|none]
   pi-task log <id> [-n 30]
@@ -1012,8 +1012,8 @@ const USAGE = `usage:
   pi-task pending [--owner <agent id>|none]
   pi-task ack <id> [<id>...] [--owner <agent id>|none]
 
-  --owner <id>  任务归属的 agent；不给则读 PI_TASK_OWNER，都没有时记 null 并告警
-  --owner none  只匹配 owner=null 的任务
+  --owner <id>  dispatching agent; defaults to PI_TASK_OWNER, or null with a warning
+  --owner none  match only tasks with owner=null
 
 env:
   PI_TASK_DIR          task store (default ~/.pi/tasks)
