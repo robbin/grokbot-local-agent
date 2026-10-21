@@ -85,6 +85,7 @@ coding environment than by maintaining this notification chain.
 | [CLI reference](docs/pi-task-reference.md) | Commands, storage, states, exit codes and environment variables. |
 | [Routine template](routines/pi-task-notify.md) | Owner-aware completion handling. |
 | [Pi skill](skills/pi-agent/SKILL.md) | Delegation, verification and permission boundaries. |
+| [`tools/pi-telegram-monitor/`](tools/pi-telegram-monitor/README.md) | Optional: push Pi sessions live to a Telegram chat. |
 
 ## Quick start
 
@@ -149,6 +150,30 @@ both the notify event and the Bot's verified report.
 
 Install [skills/pi-agent/SKILL.md](skills/pi-agent/SKILL.md) as a Bot skill, or
 include its rules in the Bot's instructions.
+
+## Optional: watch Pi sessions in Telegram
+
+[`tools/pi-telegram-monitor/`](tools/pi-telegram-monitor/README.md) pushes Pi
+sessions to a Telegram private chat in real time, so you can follow delegated
+work from your phone:
+- One progress message per session, edited in place: the instruction, tool
+  calls with argument summaries, reply previews and a status (running / done).
+- A separate result message with the full final reply, split into parts if long.
+- Send-only: it never reads updates or accepts commands from Telegram.
+- Likely secrets (API keys, GitHub tokens, Bearer values, bot tokens, long
+  hex/base64 strings) are masked before sending; thinking and tool output bodies
+  are not sent.
+
+Setup:
+1. Create a bot with @BotFather and copy its token.
+2. Message the bot once and find your numeric chat ID.
+3. Store `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` with the host's secure input
+   facility, not in files or prompts.
+4. Copy the directory to the Bot's computer and run `./start.sh`.
+
+`start.sh` is idempotent. To survive restarts, call it from an existing periodic
+routine or startup check whose shell has both variables; if the token is not
+available there, skip rather than writing it to a file.
 
 ## License
 

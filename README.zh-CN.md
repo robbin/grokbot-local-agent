@@ -101,6 +101,20 @@ echo "exit=$?"
 | [技能](skills/pi-agent/SKILL.md) | 委派范围、调用步骤、核查与权限边界 |
 | `bin/pi-call.mjs`、`bin/pi-run` | 一次性同步调用 |
 | `bin/pi-task`、`bin/pi-task.mjs` | 有记录的任务调用与结果通知 |
+| [`tools/pi-telegram-monitor/`](tools/pi-telegram-monitor/README.md) | 可选：把 Pi 会话实时推到 Telegram |
+
+## 可选：在 Telegram 里旁观 Pi 会话
+
+[`tools/pi-telegram-monitor/`](tools/pi-telegram-monitor/README.md) 把 Pi 会话实时推到 Telegram 私聊，手机上就能看委派出去的活进展到哪。
+
+- 每个会话一条进度消息，原地滚动更新：指令摘要、工具调用和参数摘要、回复预览、状态（运行中／完成）。
+- 回复结束时另发一条“结果”消息，带最终回复全文，过长自动拆成多条。
+- 只发不收：不读取 Telegram 更新，不接受任何指令。
+- 发送前遮蔽疑似密钥（API key、GitHub token、Bearer、bot token、长 hex／base64 串）；思考内容和工具输出正文不推送。
+
+配置：用 @BotFather 建 bot 拿到 token → 给 bot 发一条消息，查到自己的数字 chat_id → 用宿主的安全输入把 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` 存成环境变量（不写文件、不放提示词）→ 把目录放到 Bot 电脑上，运行 `./start.sh`。
+
+保活：`start.sh` 是幂等的，可在已有的定期例行任务或开机检查里调用；该环境拿不到 token 时直接跳过，不要把 token 写进文件。
 
 ## License
 
