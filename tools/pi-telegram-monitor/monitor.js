@@ -194,7 +194,7 @@ async function tick() {
       await flush(st, st.done && st.dirty);
       if (st.results.length) await sendResults(st);
     }
-    for (const [f, st] of streams) if (st.done && !st.dirty && Date.now() - st.lastChange > 6 * 3600e3) streams.delete(f);
+    for (const [f, st] of streams) if (st.done && !st.dirty && Date.now() - st.lastChange > 6 * 3600e3) { known.set(f, st.offset); streams.delete(f); } // 记住已读位置，防止清理后把旧会话当新会话重推
   } catch (e) { log('tick 错误', e.message); }
   busy = false;
 }
